@@ -124,13 +124,8 @@ export class GameService {
   }
 
   private isValidCardToAdd(gameState: GameState, card: Card, playerId: string): boolean {
-    // Первый ход - можно класть любую карту, кроме козыря если есть другие
+    // Первый ход - можно класть любую карту
     if (gameState.table.attacking.length === 0) {
-      const player = gameState.players[playerId];
-      const hasNonTrumpCards = player.cards.some(c => c.suit !== gameState.trump.suit);
-      if (hasNonTrumpCards && card.suit === gameState.trump.suit) {
-        return false;
-      }
       return true;
     }
 
@@ -160,35 +155,33 @@ export class GameService {
 
   public handleTakeCards(gameState: GameState, playerId: string): void {
     if (!gameState.canTakeCards || gameState.nextDefender !== playerId) return;
-
     const defender = gameState.players[playerId];
-    
     // Забираем все карты со стола
     const allTableCards = [...gameState.table.attacking, ...gameState.table.defending.filter(c => c !== null)];
     defender.cards.push(...allTableCards);
-    
     // Очищаем стол
     gameState.table.attacking = [];
     gameState.table.defending = [];
-    
-    // Отмечаем, что игрок взял карты
-    defender.hasPickedUpCards = true;
-    gameState.canTakeCards = false;
-    
     // Добираем карты всем игрокам
     this.dealCards(gameState);
-    
-    // Ход переходит к следующему после взявшего
-    const currentIndex = gameState.turnOrder.indexOf(playerId);
-    const nextIndex = (currentIndex + 1) % gameState.turnOrder.length;
+    // Отмечаем, что игрок взял карты и должен пропустить ход
+    defender.hasPickedUpCards = true;
+    gameState.canTakeCards = false;
+    // Передаем ход следующему по кругу (пропуская взявшего карты)
+    const defenderIndex = gameState.turnOrder.indexOf(playerId);
+    let nextIndex = (defenderIndex + 1) % gameState.turnOrder.length;
+    // Если следующий игрок тоже только что взял карты, ищем первого без hasPickedUpCards
+    let safety = 0;
+    while (gameState.players[gameState.turnOrder[nextIndex]].hasPickedUpCards && safety < gameState.turnOrder.length) {
+      nextIndex = (nextIndex + 1) % gameState.turnOrder.length;
+      safety++;
+    }
     gameState.currentTurn = gameState.turnOrder[nextIndex];
     gameState.nextDefender = gameState.turnOrder[(nextIndex + 1) % gameState.turnOrder.length];
-    
-    // Сбрасываем флаги раунда
+    // Сброс флагов
     gameState.passedPlayers = [];
     gameState.roundEnded = true;
-
-    // Обновляем статусы атакующих
+    gameState.status = 'playing';
     Object.values(gameState.players).forEach(player => {
       player.isAttacker = false;
     });
@@ -202,10 +195,30 @@ export class GameService {
 
     // Проверяем, может ли игрок ходить
     if (isDefending) {
+      // Для защиты проверяем только то, что игрок является защищающимся
       if (playerId !== gameState.nextDefender) return false;
     } else {
-      if (playerId !== gameState.currentTurn && !player.isAttacker) return false;
-      if (player.hasPickedUpCards) return false;  // Нельзя подкидывать, если взял карты
+      // Для атаки проверяем два условия:
+      // 1. Это должен быть ход игрока
+      if (playerId !== gameState.currentTurn) return false;
+      
+      // 2. Если игрок должен пропустить ход (взял карты ранее)
+      if (player.hasPickedUpCards) {
+        // Пропускаем ход этого игрока
+        const currentIndex = gameState.turnOrder.indexOf(playerId);
+        const nextIndex = (currentIndex + 1) % gameState.turnOrder.length;
+        gameState.currentTurn = gameState.turnOrder[nextIndex];
+        gameState.nextDefender = gameState.turnOrder[(nextIndex + 1) % gameState.turnOrder.length];
+        player.hasPickedUpCards = false; // Сбрасываем флаг после пропуска хода
+        
+        // Обновляем статусы атакующих
+        Object.values(gameState.players).forEach(p => {
+          p.isAttacker = false;
+        });
+        gameState.players[gameState.currentTurn].isAttacker = true;
+        
+        return false;
+      }
     }
 
     if (isDefending) {
@@ -273,42 +286,38 @@ export class GameService {
     if (this.checkGameEnd(gameState)) {
       return;
     }
-
-    // Сбрасываем флаг взятия карт для всех игроков
-    Object.values(gameState.players).forEach(player => {
-      player.hasPickedUpCards = false;
-    });
-
+    // Сброс флага взятия карт только если все карты отбиты успешно
+    if (!gameState.roundEnded && gameState.table.defending.length === gameState.table.attacking.length) {
+      Object.values(gameState.players).forEach(player => {
+        player.hasPickedUpCards = false;
+      });
+    }
     // Раздаем карты
     this.dealCards(gameState);
-
     // Очищаем стол
     gameState.table.attacking = [];
     gameState.table.defending = [];
-
     // Сбрасываем список пропустивших ход
     gameState.passedPlayers = [];
-
     // Определяем следующего атакующего и защищающегося
-    // Если защищающийся отбился, он становится следующим атакующим
     if (!gameState.roundEnded && gameState.table.defending.length === gameState.table.attacking.length) {
+      // Если защищающийся отбился, он становится следующим атакующим
       const prevDefender = gameState.nextDefender;
-      const defenderIndex = gameState.turnOrder.indexOf(prevDefender);
       gameState.currentTurn = prevDefender;
-      gameState.nextDefender = gameState.turnOrder[(defenderIndex + 1) % gameState.turnOrder.length];
+      gameState.nextDefender = gameState.turnOrder[(gameState.turnOrder.indexOf(prevDefender) + 1) % gameState.turnOrder.length];
+    } else if (gameState.roundEnded) {
+      // Если раунд закончился (кто-то взял карты), ход уже передан в handleTakeCards
     } else {
-      // Если защищающийся взял карты или пропустил ход
+      // Если был пас или другое действие
       const currentIndex = gameState.turnOrder.indexOf(gameState.currentTurn);
       gameState.currentTurn = gameState.turnOrder[(currentIndex + 1) % gameState.turnOrder.length];
       gameState.nextDefender = gameState.turnOrder[(currentIndex + 2) % gameState.turnOrder.length];
     }
-
     // Обновляем статусы атакующих
     Object.values(gameState.players).forEach(player => {
       player.isAttacker = false;
     });
     gameState.players[gameState.currentTurn].isAttacker = true;
-
     gameState.canTakeCards = false;
     gameState.roundEnded = false;
     gameState.firstMove = false;
