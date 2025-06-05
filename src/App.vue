@@ -2,7 +2,7 @@
 import { ref, onMounted, computed } from 'vue'
 import { io } from 'socket.io-client'
 
-const socket = io('http://localhost:3005')
+const socket = io('http://localhost:3000')
 
 const gameState = ref(null)
 const selectedCard = ref(null)
@@ -71,7 +71,6 @@ const passTurn = () => {
 }
 
 const takingCards = ref(false);
-const tableCardsVisible = ref(true);
 
 const takeCards = () => {
   if (
@@ -79,7 +78,6 @@ const takeCards = () => {
     (canOnlyTakeCards.value && gameState.value?.nextDefender === socket.id)
   ) {
     takingCards.value = true;
-    tableCardsVisible.value = false;
     socket.emit('takeCards', {
       lobbyId: gameState.value.lobbyId
     });
@@ -125,7 +123,6 @@ onMounted(() => {
   socket.on('gameStateUpdated', (state) => {
     gameState.value = state;
     takingCards.value = false;
-    tableCardsVisible.value = true;
     updateGameStatus();
   });
   socket.on('gameEnded', ({ winner }) => {
@@ -179,18 +176,9 @@ const getSuitSymbol = (suit) => {
 
 const canAttackWith = (card) => {
   if (!gameState.value || gameState.value.currentTurn !== socket.id) return false;
-  if (!gameState.value.players.self.isAttacker) return false;
-  if (gameState.value.players.self.hasPickedUpCards) return false; // Нельзя подкидывать, если взял карты
 
-  // Первый ход
+  // Первый ход или новая атака (стол пустой) - можно ходить любой картой
   if (gameState.value.table.attacking.length === 0) {
-    // Если есть не козырные карты, нельзя ходить козырем
-    const hasNonTrumpCards = gameState.value.players.self.cards.some(
-      c => c.suit !== gameState.value.trump.suit
-    );
-    if (hasNonTrumpCards && card.suit === gameState.value.trump.suit) {
-      return false;
-    }
     return true;
   }
 
@@ -218,40 +206,73 @@ const canAttackWith = (card) => {
 }
 
 const canDefendWith = (card) => {
-  if (!gameState.value || gameState.value.nextDefender !== socket.id) return false;
+  if (!gameState.value) {
+    console.log('No game state');
+    return false;
+  }
   
+  if (gameState.value.nextDefender !== socket.id) {
+    console.log('Not a defender', gameState.value.nextDefender, socket.id);
+    return false;
+  }
+
   const lastAttackingCard = gameState.value.table.attacking[
     gameState.value.table.defending.length
   ];
-  if (!lastAttackingCard) return false;
+  
+  if (!lastAttackingCard) {
+    console.log('No attacking card to defend against');
+    return false;
+  }
+
+  console.log('Defending card:', card);
+  console.log('Against card:', lastAttackingCard);
+  console.log('Trump suit:', gameState.value.trump.suit);
 
   // Если атакующая карта козырная
   if (lastAttackingCard.suit === gameState.value.trump.suit) {
     // Можно бить только старшим козырем
-    return card.suit === gameState.value.trump.suit && card.value > lastAttackingCard.value;
+    const canDefend = card.suit === gameState.value.trump.suit && card.value > lastAttackingCard.value;
+    console.log('Defending against trump with:', card.suit, card.value, canDefend);
+    return canDefend;
   }
 
   // Если карта защиты козырная, а атакующая нет - можно бить
   if (card.suit === gameState.value.trump.suit && lastAttackingCard.suit !== gameState.value.trump.suit) {
+    console.log('Defending with trump against non-trump');
     return true;
   }
 
   // В остальных случаях можно бить только старшей картой той же масти
-  return card.suit === lastAttackingCard.suit && card.value > lastAttackingCard.value;
+  const canDefend = card.suit === lastAttackingCard.suit && card.value > lastAttackingCard.value;
+  console.log('Regular defense:', card.suit, card.value, 'vs', lastAttackingCard.suit, lastAttackingCard.value, canDefend);
+  return canDefend;
 }
 
 const playCard = (card) => {
   if (!gameState.value || !gameState.value.lobbyId) return;
 
   const isDefendingNow = gameState.value.nextDefender === socket.id;
+  console.log('Is defending:', isDefendingNow); // Debug log
   
-  // Проверяем, можно ли сыграть карту
+  // Проверяем, может ли игрок ходить
   if (isDefendingNow) {
+    // Для защиты:
     if (!canDefendWith(card)) {
       status.value = 'Этой картой нельзя отбиться!';
+      console.log('Cannot defend with card:', card); // Debug log
       return;
     }
   } else {
+    // Для атаки:
+    if (gameState.value.currentTurn !== socket.id) {
+      status.value = 'Сейчас не ваш ход!';
+      return;
+    }
+    if (gameState.value.players.self.hasPickedUpCards) {
+      status.value = 'Вы должны пропустить ход после взятия карт!';
+      return;
+    }
     if (!canAttackWith(card)) {
       status.value = 'Этой картой сейчас нельзя ходить!';
       return;
@@ -324,6 +345,9 @@ const playCard = (card) => {
     </div>
 
     <!-- Игровой стол -->
+
+
+
     <div v-else-if="gameState" class="game-board">      <!-- Статус игры -->
       <div class="game-info">
         <div class="status">{{ status }}</div>
@@ -373,33 +397,30 @@ const playCard = (card) => {
           </div>
         </div>
         <div class="playing-field">
-          <transition-group name="fade" tag="div">
-            <div v-for="(attack, index) in gameState.table.attacking" 
-                 v-if="tableCardsVisible"
-                 :key="'attack' + index" 
-                 class="card-pair">
-              <div class="card" :class="[attack.suit, takingCards ? 'taking' : '']">
-                <div class="card-content">
-                  <div class="card-top">{{ attack.rank }}</div>
-                  <div class="card-suit">
-                    {{ getSuitSymbol(attack.suit) }}
-                  </div>
-                  <div class="card-bottom">{{ attack.rank }}</div>
+          <div v-for="(attack, index) in gameState.table.attacking" 
+               :key="'attack' + index" 
+               class="card-pair">
+            <div class="card" :class="[attack.suit, takingCards ? 'taking' : '']">
+              <div class="card-content">
+                <div class="card-top">{{ attack.rank }}</div>
+                <div class="card-suit">
+                  {{ getSuitSymbol(attack.suit) }}
                 </div>
-              </div>
-              <div v-if="gameState.table.defending[index]" 
-                   class="card defending"
-                   :class="[gameState.table.defending[index].suit, takingCards ? 'taking' : '']">
-                <div class="card-content">
-                  <div class="card-top">{{ gameState.table.defending[index].rank }}</div>
-                  <div class="card-suit">
-                    {{ getSuitSymbol(gameState.table.defending[index].suit) }}
-                  </div>
-                  <div class="card-bottom">{{ gameState.table.defending[index].rank }}</div>
-                </div>
+                <div class="card-bottom">{{ attack.rank }}</div>
               </div>
             </div>
-          </transition-group>
+            <div v-if="gameState.table.defending[index]" 
+                 class="card defending"
+                 :class="[gameState.table.defending[index].suit, takingCards ? 'taking' : '']">
+              <div class="card-content">
+                <div class="card-top">{{ gameState.table.defending[index].rank }}</div>
+                <div class="card-suit">
+                  {{ getSuitSymbol(gameState.table.defending[index].suit) }}
+                </div>
+                <div class="card-bottom">{{ gameState.table.defending[index].rank }}</div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -408,9 +429,7 @@ const playCard = (card) => {
         <button v-if="gameState.currentTurn === socket.id" @click="endTurn" :disabled="gameState.status === 'taking_cards'">
           Завершить ход
         </button>
-        <button v-if="gameState.currentTurn === socket.id" @click="passTurn" :disabled="!gameState.table.attacking.length">
-          Пропустить
-        </button>
+        
         <button v-if="gameState.canTakeCards && gameState.nextDefender === socket.id" @click="takeCards">
           Взять карты
         </button>
@@ -442,6 +461,16 @@ const playCard = (card) => {
 </template>
 
 <style scoped>
+
+.app-container {
+  width: 100vw;
+  height: 100vh;
+  background-image: url('/image/background_2.jpg');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
 .game-container {
   max-width: 1200px;
   margin: 0 auto;
@@ -748,13 +777,5 @@ button:disabled {
   padding: 20px;
   width: 100%;
   position: relative;
-}
-
-/* Плавное исчезновение/появление карт на столе */
-.fade-enter-active, .fade-leave-active {
-  transition: opacity 0.5s;
-}
-.fade-enter-from, .fade-leave-to {
-  opacity: 0;
 }
 </style>

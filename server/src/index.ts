@@ -134,14 +134,11 @@ io.on('connection', (socket: Socket) => {
   socket.on('playCard', ({ lobbyId, card, isDefending }: { lobbyId: string, card: Card, isDefending: boolean }) => {
     const gameState = games.get(lobbyId);
     const lobby = lobbies.get(lobbyId);
-    
     if (!gameState || !lobby) return;
-    
     // Проверяем, может ли игрок сделать ход
     if (isDefending && gameState.nextDefender !== socket.id) return;
-    if (!isDefending && gameState.currentTurn !== socket.id && !gameState.players[socket.id]?.isAttacker) return;
-    if (gameState.players[socket.id]?.hasPickedUpCards) return;
-
+    if (!isDefending && gameState.currentTurn !== socket.id) return;
+    if (!isDefending && gameState.players[socket.id]?.hasPickedUpCards) return;
     if (gameService.makeMove(gameState, socket.id, card, isDefending)) {
       updateGameState(gameState, lobby);
     }
@@ -251,6 +248,6 @@ io.on('connection', (socket: Socket) => {
   });
 });
 
-server.listen(3005, '0.0.0.0', () => {
-  console.log('Server is running on port 3005');
+server.listen(3000, () => {
+  console.log('Server is running on port 3000');
 });
