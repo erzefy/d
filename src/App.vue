@@ -2,7 +2,7 @@
 import { ref, onMounted, computed } from 'vue'
 import { io } from 'socket.io-client'
 
-const socket = io('http://192.168.31.10:3005')
+const socket = io('http://localhost:3005')
 
 const gameState = ref(null)
 const selectedCard = ref(null)
@@ -14,6 +14,11 @@ const showLobbyForm = ref(true)
 const isDefending = computed(() => 
   gameState.value?.nextDefender === socket.id
 )
+const canOnlyTakeCards = computed(() => {
+  if (!gameState.value || gameState.value.nextDefender !== socket.id) return false;
+  // Если хотя бы одной картой можно отбиться, возвращаем false
+  return !gameState.value.players.self.cards.some(canDefendWith);
+})
 
 const createLobby = () => {
   if (!playerName.value) {
@@ -65,14 +70,23 @@ const passTurn = () => {
   }
 }
 
+const takingCards = ref(false);
+const tableCardsVisible = ref(true);
+
 const takeCards = () => {
-  if (gameState.value?.canTakeCards && gameState.value?.nextDefender === socket.id) {
+  if (
+    (gameState.value?.canTakeCards && gameState.value?.nextDefender === socket.id) ||
+    (canOnlyTakeCards.value && gameState.value?.nextDefender === socket.id)
+  ) {
+    takingCards.value = true;
+    tableCardsVisible.value = false;
     socket.emit('takeCards', {
       lobbyId: gameState.value.lobbyId
     });
   }
 }
 
+// Сброс анимации после обновления состояния
 onMounted(() => {
   socket.emit('getLobbies');
 
@@ -110,6 +124,8 @@ onMounted(() => {
 
   socket.on('gameStateUpdated', (state) => {
     gameState.value = state;
+    takingCards.value = false;
+    tableCardsVisible.value = true;
     updateGameStatus();
   });
   socket.on('gameEnded', ({ winner }) => {
@@ -194,6 +210,9 @@ const canAttackWith = (card) => {
     ...gameState.value.table.attacking.map(c => c.rank),
     ...gameState.value.table.defending.filter(c => c !== null).map(c => c.rank)
   ]);
+
+  // Только если ход не завершён (все карты не отбиты)
+  if (gameState.value.table.defending.length === gameState.value.table.attacking.length) return false;
 
   return validRanks.has(card.rank);
 }
@@ -353,47 +372,46 @@ const playCard = (card) => {
             </div>
           </div>
         </div>
-
         <div class="playing-field">
-          <div v-for="(attack, index) in gameState.table.attacking" 
-               :key="'attack' + index" 
-               class="card-pair">
-            <div class="card" :class="attack.suit">
-              <div class="card-content">
-                <div class="card-top">{{ attack.rank }}</div>
-                <div class="card-suit">
-                  {{ getSuitSymbol(attack.suit) }}
+          <transition-group name="fade" tag="div">
+            <div v-for="(attack, index) in gameState.table.attacking" 
+                 v-if="tableCardsVisible"
+                 :key="'attack' + index" 
+                 class="card-pair">
+              <div class="card" :class="[attack.suit, takingCards ? 'taking' : '']">
+                <div class="card-content">
+                  <div class="card-top">{{ attack.rank }}</div>
+                  <div class="card-suit">
+                    {{ getSuitSymbol(attack.suit) }}
+                  </div>
+                  <div class="card-bottom">{{ attack.rank }}</div>
                 </div>
-                <div class="card-bottom">{{ attack.rank }}</div>
+              </div>
+              <div v-if="gameState.table.defending[index]" 
+                   class="card defending"
+                   :class="[gameState.table.defending[index].suit, takingCards ? 'taking' : '']">
+                <div class="card-content">
+                  <div class="card-top">{{ gameState.table.defending[index].rank }}</div>
+                  <div class="card-suit">
+                    {{ getSuitSymbol(gameState.table.defending[index].suit) }}
+                  </div>
+                  <div class="card-bottom">{{ gameState.table.defending[index].rank }}</div>
+                </div>
               </div>
             </div>
-            <div v-if="gameState.table.defending[index]" 
-                 class="card defending" 
-                 :class="gameState.table.defending[index].suit">
-              <div class="card-content">
-                <div class="card-top">{{ gameState.table.defending[index].rank }}</div>
-                <div class="card-suit">
-                  {{ getSuitSymbol(gameState.table.defending[index].suit) }}
-                </div>
-                <div class="card-bottom">{{ gameState.table.defending[index].rank }}</div>
-              </div>
-            </div>
-          </div>
+          </transition-group>
         </div>
       </div>
 
       <!-- Контролы игры -->
-      <div class="game-actions" v-if="gameState.currentTurn === socket.id">
-        <button @click="endTurn" 
-                :disabled="gameState.status === 'taking_cards'">
+      <div class="game-actions" v-if="gameState.currentTurn === socket.id || gameState.nextDefender === socket.id">
+        <button v-if="gameState.currentTurn === socket.id" @click="endTurn" :disabled="gameState.status === 'taking_cards'">
           Завершить ход
         </button>
-        <button @click="passTurn" 
-                :disabled="!gameState.table.attacking.length">
+        <button v-if="gameState.currentTurn === socket.id" @click="passTurn" :disabled="!gameState.table.attacking.length">
           Пропустить
         </button>
-        <button v-if="gameState.canTakeCards && gameState.nextDefender === socket.id"
-                @click="takeCards">
+        <button v-if="gameState.canTakeCards && gameState.nextDefender === socket.id" @click="takeCards">
           Взять карты
         </button>
       </div>
@@ -552,90 +570,82 @@ const playCard = (card) => {
 
 
 .trump-card {
-  transform: rotate(90deg);
-  margin-left: -30px;
-}
-
-.deck-pile {
   position: relative;
-}
-
-.deck-pile::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.1);
-  border-radius: 10px;
-}
-
-.player-hand, .opponent-hand {
-  display: flex;
-  gap: 10px;
-  justify-content: center;
-  min-height: 100px;
+  left: 10px;
+  top: -20px;
+  z-index: 1;
+  transform: rotate(-90deg);
+  margin-left: 0;
+  color: #e4e4e4;
 }
 
 .deck-area {
   display: flex;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
   margin-bottom: 20px;
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 2;
+}
+
+.card.deck {
+  position: relative;
+  z-index: 2;
+  margin-bottom: -30px;
+  color: #ffffff; /* Ярко-синий цвет для цифры количества карт */
+  font-weight: bold;
+  font-size: 1.5em;
+}
+
+.table {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  width: 100%;
+  position: relative;
+  min-height: 200px;
 }
 
 .playing-field {
   display: flex;
+  flex-direction: row;
   justify-content: center;
-  align-items: center;
+  align-items: flex-end;
   min-height: 200px;
   padding: 20px;
+  width: 100%;
+  position: relative;
 }
 
-.card-pair {
+.playing-field .card-pair {
+  position: relative;
+  width: 100px;
+  height: 150px;
+  margin-left: -40px; /* увеличено расстояние между парами */
+  z-index: 1;
   display: flex;
   flex-direction: column;
-  margin: 0 10px;
+  align-items: center;
 }
 
-.card-pair .defending {
+.playing-field .card-pair:first-child {
+  margin-left: 0;
+}
+
+.playing-field .card {
   position: absolute;
-  top: 20px;
-  left: 10px;
+  left: 0;
+  top: 0;
 }
 
-.selected {
-  transform: translateY(-10px);
-  box-shadow: 0 0 10px rgba(255,255,255,0.5);
-}
-
-.playable:hover {
-  transform: translateY(-5px);
-  box-shadow: 0 0 15px rgba(255,255,255,0.3);
-}
-
-.game-info {
-  background: rgba(0,0,0,0.5);
-  padding: 15px;
-  border-radius: 10px;
-  color: white;
-  margin-bottom: 20px;
-  text-align: center;
-}
-
-.trump-info {
-  margin: 10px 0;
-  font-size: 1.2em;
-}
-
-.trump-info span {
-  font-size: 1.5em;
-  vertical-align: middle;
-}
-
-.turn-info {
-  font-size: 1.1em;
-  font-weight: bold;
+.playing-field .defending {
+  top: 30px;
+  left: 20px;
+  z-index: 2;
+  box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
 }
 
 /* Улучшаем отображение мастей */
@@ -692,38 +702,6 @@ button:disabled {
   transform: rotate(180deg);
 }
 
-.trump-card {
-  transform: rotate(-90deg);
-  margin-left: -30px; /* Сдвигаем козырь влево, чтобы он выглядел как-будто лежит под колодой */
-  color: #e4e4e4;
-}
-
-.playing-field .card-pair {
-  position: relative;
-  perspective: 1000px;
-}
-
-.playing-field .defending {
-  transform: translate(20px, 20px);
-  box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
-}
-
-/* Добавляем подсветку для карт, которыми можно ходить */
-.card.playable {
-  box-shadow: 0 0 10px #4CAF50;
-}
-
-.card.playable:hover {
-  transform: translateY(-10px);
-  box-shadow: 0 0 15px #4CAF50;
-}
-
-/* Подсветка для текущего игрока */
-.opponent.current {
-  box-shadow: 0 0 15px rgba(255,255,0,0.5);
-  background: rgba(255,255,0,0.2);
-}
-
 /* Анимация для взятия карт */
 @keyframes shake {
   0%, 100% { transform: translateX(0); }
@@ -733,5 +711,50 @@ button:disabled {
 
 .card.taking {
   animation: shake 0.5s ease-in-out;
+}
+
+.player-hand {
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+  justify-content: center;
+  min-height: 160px;
+  margin-top: 20px;
+}
+
+.opponent-hand {
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+  justify-content: center;
+  min-height: 160px;
+}
+
+.table {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  width: 100%;
+  position: relative;
+  min-height: 200px;
+}
+
+.playing-field {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: flex-end;
+  min-height: 200px;
+  padding: 20px;
+  width: 100%;
+  position: relative;
+}
+
+/* Плавное исчезновение/появление карт на столе */
+.fade-enter-active, .fade-leave-active {
+  transition: opacity 0.5s;
+}
+.fade-enter-from, .fade-leave-to {
+  opacity: 0;
 }
 </style>
